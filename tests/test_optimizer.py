@@ -2405,6 +2405,34 @@ SELECT :with_,WITH :expressions,CTE :this,UNION :this,SELECT :expressions,1,:exp
             optimizer.optimize_joins.optimize_joins,
         )
 
+    def test_optimize_joins_comma_outer_join_grouping(self):
+        # Reconciliation pipeline regression: rewriting comma joins into explicit joins must
+        # not regroup the FROM clause. Comma joins bind less tightly than JOIN, so standard
+        # SQL groups `x, y RIGHT JOIN z` as `x, (y RIGHT JOIN z)`. Normalizing the comma to
+        # `x CROSS JOIN y RIGHT JOIN z` would regroup it into `(x CROSS JOIN y) RIGHT JOIN z`
+        # and silently change the rows preserved by the RIGHT/FULL join. LEFT joins are
+        # safe: `(x CROSS JOIN y) LEFT JOIN z` preserves exactly the rows of
+        # `x, (y LEFT JOIN z)`.
+        schema = {"x": {"a": "INT"}, "y": {"a": "INT"}, "z": {"a": "INT"}, "w": {"a": "INT"}}
+        for sql, expected in {
+            "SELECT x.a, y.a, z.a FROM x, y RIGHT JOIN z ON y.a = z.a":
+                'SELECT "x"."a" AS "a", "y"."a" AS "a", "z"."a" AS "a" FROM "x" AS "x", "y" AS "y" RIGHT JOIN "z" AS "z" ON "y"."a" = "z"."a"',
+            "SELECT x.a, y.a, z.a FROM x, y FULL JOIN z ON y.a = z.a":
+                'SELECT "x"."a" AS "a", "y"."a" AS "a", "z"."a" AS "a" FROM "x" AS "x", "y" AS "y" FULL JOIN "z" AS "z" ON "y"."a" = "z"."a"',
+            "SELECT x.a, y.a, z.a FROM x, y LEFT JOIN z ON y.a = z.a":
+                'SELECT "x"."a" AS "a", "y"."a" AS "a", "z"."a" AS "a" FROM "x" AS "x" CROSS JOIN "y" AS "y" LEFT JOIN "z" AS "z" ON "y"."a" = "z"."a"',
+            "SELECT x.a, y.a, z.a, w.a FROM x, y, z RIGHT JOIN w ON z.a = w.a":
+                'SELECT "x"."a" AS "a", "y"."a" AS "a", "z"."a" AS "a", "w"."a" AS "a" FROM "x" AS "x", "y" AS "y", "z" AS "z" RIGHT JOIN "w" AS "w" ON "w"."a" = "z"."a"',
+            # Comma joins after the last sided join are top-level cross products
+            "SELECT x.a, y.a, z.a FROM x RIGHT JOIN y ON x.a = y.a, z":
+                'SELECT "x"."a" AS "a", "y"."a" AS "a", "z"."a" AS "a" FROM "x" AS "x" RIGHT JOIN "y" AS "y" ON "x"."a" = "y"."a" CROSS JOIN "z" AS "z"',
+            # Pure comma joins still normalize to explicit cross joins
+            "SELECT x.a, y.a FROM x, y":
+                'SELECT "x"."a" AS "a", "y"."a" AS "a" FROM "x" AS "x" CROSS JOIN "y" AS "y"',
+        }.items():
+            with self.subTest(sql=sql):
+                self.assertEqual(optimizer.optimize(sql, schema=schema).sql(), expected)
+
     def test_optimize_paste_joins(self):
         for sql in (
             "SELECT * FROM x PASTE JOIN y",

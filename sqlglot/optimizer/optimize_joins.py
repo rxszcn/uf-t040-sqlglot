@@ -94,11 +94,30 @@ def normalize(expression: E) -> E:
     """
     Remove INNER and OUTER from joins as they are optional.
     """
+    # Comma joins bind less tightly than joins that use the JOIN keyword, i.e. standard SQL
+    # groups `x, y RIGHT JOIN z` as `x, (y RIGHT JOIN z)`. Rewriting the comma join as a
+    # CROSS JOIN would regroup the FROM clause into `(x CROSS JOIN y) RIGHT JOIN z`, which
+    # changes the rows preserved by the RIGHT/FULL join, so comma joins that precede a
+    # RIGHT/FULL join in the same FROM clause are left as-is. LEFT joins don't need this
+    # guard: `(x CROSS JOIN y) LEFT JOIN z` preserves exactly the rows of `x, (y LEFT JOIN z)`.
+    comma_grouped: set[int] = set()
+    for select in expression.find_all(exp.Select):
+        joins: list[exp.Join] = select.args.get("joins") or []
+        last_sided = max(
+            (i for i, join in enumerate(joins) if join.side in ("RIGHT", "FULL")), default=0
+        )
+        comma_grouped.update(
+            id(join) for join in joins[:last_sided] if not any(join.args.get(k) for k in JOIN_ATTRS)
+        )
+
     for join in expression.find_all(exp.Join):
         if join.kind == "PASTE" or join.args.get("nearest"):
             continue
 
         if not any(join.args.get(k) for k in JOIN_ATTRS):
+            if id(join) in comma_grouped:
+                continue
+
             join.set("kind", "CROSS")
 
         if join.kind == "CROSS":
